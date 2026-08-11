@@ -12,7 +12,8 @@ return function(mod)
       label = "SELECTION",
       choices = {
         { "Top Down", "top_down" },
-        { "Dynamic", "dynamic" }
+        { "(Unstable) Dynamic", "dynamic" },
+        { "(Unstable) Draft", "draft" }
       },
       default = "top_down"
     }
@@ -42,7 +43,7 @@ return function(mod)
     })
     mon.status = "OUT"
     
-    -- Spoof HP to 1 so the engine draws the dark UI ball and natively rejects Revives.
+    -- Força HP a 1 para UI exibir pokébola escura e negar uso de Revives
     if mon.hp <= 0 then
       mon.hp = 1
     end
@@ -90,6 +91,14 @@ return function(mod)
       if mon.hp > 0 then healthy_total = healthy_total + 1 end
     end
 
+    -- Queue the MATCH RULES dialogue FIRST before any UI is pushed
+    if healthy_total > enemy_count then
+      battle:say(string.format("MATCH RULES: %dV%d", enemy_count, enemy_count))
+    end
+
+    -- ===========================
+    -- MODO 1: TOP DOWN
+    -- ===========================
     if mode == "top_down" then
       local healthy_counted = 0
       for i = 1, player_count do
@@ -107,27 +116,145 @@ return function(mod)
       end
       current_match.locked = true
       
+    -- ===========================
+    -- MODO 2: DYNAMIC
+    -- ===========================
     elseif mode == "dynamic" then
       local lead = battle.player.mon
       table.insert(current_match.active, lead)
 
       for i = 1, player_count do
         local mon = player_party[i]
-        -- Even in dynamic mode, pre-fainted mons cannot be chosen
         if mon.hp <= 0 and mon ~= lead then
           bench_mon(current_match, mon)
         end
       end
       
       check_dynamic_limit(current_match, player_party)
-    end
 
-    if healthy_total > enemy_count then
-      battle:say(string.format("MATCH RULES: %dV%d", enemy_count, enemy_count))
+    -- ===========================
+    -- MODO 3: DRAFT (BATTLE TOWER STYLE)
+    -- ===========================
+    elseif mode == "draft" then
+      local lead = battle.player.mon
+      table.insert(current_match.active, lead)
+
+      -- Bench pre-fainted Pokémon immediately
+      for i = 1, player_count do
+        local mon = player_party[i]
+        if mon.hp <= 0 and mon ~= lead then
+          bench_mon(current_match, mon)
+        end
+      end
+
+      -- If player has more healthy Pokémon than enemy count, invoke draft UI
+      if healthy_total > enemy_count then
+        local picks_needed = enemy_count - 1
+        
+        -- If enemy only has 1 Pokémon, lead is enough. Auto-bench the rest.
+        if picks_needed == 0 then
+          for i = 1, player_count do
+            local mon = player_party[i]
+            if mon ~= lead and mon.status ~= "OUT" then
+              bench_mon(current_match, mon)
+            end
+          end
+          current_match.locked = true
+        else
+          -- Insert Selection UI into Battle Queue
+          battle:ui(function()
+            local items = {}
+            local current_picks = 0
+            local picked_mons = {}
+            
+            for i = 1, player_count do
+              local mon = player_party[i]
+              -- Safe check: filter out lead and anyone marked OUT (which includes fainted ones)
+              if mon ~= lead and mon.status ~= "OUT" then
+                local item = {
+                  label = mon.nickname or battle.game.data.pokemon[mon.species].name,
+                  right = " ",
+                  mon = mon
+                }
+                item.onSelect = function(self_item, menu)
+                  if picked_mons[mon] then
+                    picked_mons[mon] = nil
+                    current_picks = current_picks - 1
+                    self_item.right = " "
+                  else
+                    if current_picks < picks_needed then
+                      picked_mons[mon] = true
+                      current_picks = current_picks + 1
+                      self_item.right = "IN"
+                    else
+                      require("src.core.Sound").play(battle.game.data, "Denied")
+                    end
+                  end
+                end
+                table.insert(items, item)
+              end
+            end
+            
+            table.insert(items, {
+              label = "[ FINISH ]",
+              onSelect = function(self_item, menu)
+                if current_picks == picks_needed then
+                  -- Lock choices and close menu
+                  for _, item_mon in ipairs(items) do
+                    if item_mon.mon then
+                      if picked_mons[item_mon.mon] then
+                        table.insert(current_match.active, item_mon.mon)
+                      else
+                        bench_mon(current_match, item_mon.mon)
+                      end
+                    end
+                  end
+                  current_match.locked = true
+                  menu:close()
+                else
+                  -- Provide UI feedback instead of just failing silently
+                  require("src.core.Sound").play(battle.game.data, "Denied")
+                  local TextBox = require("src.render.TextBox")
+                  local missing = picks_needed - current_picks
+                  battle.game.stack:push(TextBox.new(battle.game, "Please select\n" .. missing .. " more!"))
+                end
+              end
+            })
+
+            local function fallback_autofill()
+              -- Auto-fill the missing picks to avoid exploits on B-Cancel
+              for _, item_mon in ipairs(items) do
+                if item_mon.mon then
+                  if current_picks < picks_needed and not picked_mons[item_mon.mon] then
+                    picked_mons[item_mon.mon] = true
+                    current_picks = current_picks + 1
+                    table.insert(current_match.active, item_mon.mon)
+                  elseif not picked_mons[item_mon.mon] then
+                    bench_mon(current_match, item_mon.mon)
+                  else
+                    table.insert(current_match.active, item_mon.mon)
+                  end
+                end
+              end
+              current_match.locked = true
+            end
+
+            return mod.ui.ListMenu.new(battle.game, "CHOOSE " .. picks_needed, items, {
+              footer = "A:SEL B:AUTOFILL",
+              onChoose = function(item, menu)
+                if item.onSelect then item.onSelect(item, menu) end
+              end,
+              onCancel = function()
+                fallback_autofill()
+              end
+            })
+          end)
+        end
+      end
     end
   end)
 
-  -- Track dynamically sent out Pokémon
+  -- Continuous dynamic check for "Dynamic" mode
   mod.events:on("battle.battler_switched", function(ev)
     if current_match and ev.battler.isPlayer then
       local new_mon = ev.battler.mon
@@ -138,7 +265,7 @@ return function(mod)
     end
   end)
 
-  -- Prevent voluntary switching from the submenu
+  -- Prevent voluntary switching from submenu
   mod.hooks:wrap("ui.party.submenu", function(next, game, items, mon, ctx)
     local result = next(game, items, mon, ctx)
     if ctx.battle and current_match and mon.status == "OUT" then
@@ -153,7 +280,7 @@ return function(mod)
     return result
   end)
 
-  -- Prevent forced switching by intercepting PartyMenu's onSwitch
+  -- Prevent forced switching from items/moves via PartyMenu hook
   local orig_PartyMenu = mod.content.screens:get("PartyMenu")
   if orig_PartyMenu then
     mod.content.screens:override("PartyMenu", {
@@ -176,13 +303,12 @@ return function(mod)
     })
   end
 
-  -- If all allowed active Pokemon faint, drop benched HP to 0 to trigger white-out
+  -- Apply native white-out if all valid active Pokémon faint
   mod.events:on("battle.fainted", function(ev)
     if not current_match then return end
     if ev.battler.isPlayer then
       local can_continue = false
       
-      -- Check if any already-active Pokémon is still alive
       for _, mon in ipairs(current_match.active) do
         if mon.hp > 0 then
           can_continue = true
@@ -190,8 +316,8 @@ return function(mod)
         end
       end
       
-      -- Check if there are valid unbenched options left (Dynamic Mode)
-      if not can_continue and #current_match.active < current_match.limit then
+      -- Validate remaining options for Dynamic mode specifically
+      if not can_continue and current_match.mode == "dynamic" and #current_match.active < current_match.limit then
         local party = current_match.battle.game.save.party
         for _, mon in ipairs(party) do
           if mon.hp > 0 and mon.status ~= "OUT" then
@@ -201,7 +327,6 @@ return function(mod)
         end
       end
 
-      -- If the player cannot continue the match, trigger a native white-out
       if not can_continue then
         for _, saved in ipairs(current_match.benched) do
           saved.mon.hp = 0
@@ -210,7 +335,7 @@ return function(mod)
     end
   end)
 
-  -- Ensure items like Full Heal do not clear the OUT status
+  -- Protect the "OUT" status from healing items
   mod.hooks:wrap("battle.overlay", function(next, battle)
     next(battle)
     if current_match then
@@ -222,7 +347,7 @@ return function(mod)
     end
   end)
 
-  -- Seamlessly restore all original HP and statuses after the match
+  -- Restore HP and Statuses natively
   mod.events:on("battle.ended", function(ev)
     if current_match then
       for _, saved in ipairs(current_match.benched) do
