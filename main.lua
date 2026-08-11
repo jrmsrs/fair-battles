@@ -42,8 +42,8 @@ return function(mod)
       hp = mon.hp
     })
     mon.status = "OUT"
-    
-    -- Força HP a 1 para UI exibir pokébola escura e negar uso de Revives
+
+    -- Force previously FNT to be OUT by forcing HP=1 during battle
     if mon.hp <= 0 then
       mon.hp = 1
     end
@@ -97,7 +97,7 @@ return function(mod)
     end
 
     -- ===========================
-    -- MODO 1: TOP DOWN
+    -- MODE 1: TOP DOWN
     -- ===========================
     if mode == "top_down" then
       local healthy_counted = 0
@@ -117,7 +117,7 @@ return function(mod)
       current_match.locked = true
       
     -- ===========================
-    -- MODO 2: DYNAMIC
+    -- MODE 2: DYNAMIC
     -- ===========================
     elseif mode == "dynamic" then
       local lead = battle.player.mon
@@ -133,7 +133,7 @@ return function(mod)
       check_dynamic_limit(current_match, player_party)
 
     -- ===========================
-    -- MODO 3: DRAFT (BATTLE TOWER STYLE)
+    -- MODE 3: DRAFT (BATTLE TOWER STYLE)
     -- ===========================
     elseif mode == "draft" then
       local lead = battle.player.mon
