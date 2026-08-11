@@ -280,28 +280,31 @@ return function(mod)
     return result
   end)
 
-  -- Prevent forced switching from items/moves via PartyMenu hook
-  local orig_PartyMenu = mod.content.screens:get("PartyMenu")
-  if orig_PartyMenu then
-    mod.content.screens:override("PartyMenu", {
-      new = function(game, opts)
-        if current_match and opts and opts.battle then
-          local orig_onSwitch = opts.onSwitch
-          if orig_onSwitch then
-            opts.onSwitch = function(mon, menu)
-              if mon.status == "OUT" then
-                local TextBox = require("src.render.TextBox")
-                game.stack:push(TextBox.new(game, "MATCH RULES:\nThis POKéMON is\nbenched!"))
-                return
-              end
-              return orig_onSwitch(mon, menu)
+  -- Dynamically intercept PartyMenu instances to handle forced switches
+  mod.events:on("screen.pushed", function(ev)
+    local state = ev.state
+    if current_match and state.onSwitch and (state.screenId == "PartyMenu" or state.party) then
+      if not state.__fair_battle_hooked then
+        state.__fair_battle_hooked = true
+        
+        local orig_onSwitch = state.onSwitch
+        state.onSwitch = function(mon, menu)
+          if mon.status == "OUT" then
+            -- PartyMenu pops itself before calling onSwitch during forced switches. Push it back.
+            if not menu.keepOpen then
+              menu.game.stack:push(menu)
             end
+            
+            require("src.core.Sound").play(menu.game.data, "Denied")
+            local TextBox = require("src.render.TextBox")
+            menu.game.stack:push(TextBox.new(menu.game, "MATCH RULES:\nThis POKéMON is\nbenched!"))
+            return
           end
+          return orig_onSwitch(mon, menu)
         end
-        return orig_PartyMenu.new(game, opts)
       end
-    })
-  end
+    end
+  end)
 
   -- Apply native white-out if all valid active Pokémon faint
   mod.events:on("battle.fainted", function(ev)
