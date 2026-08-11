@@ -5,10 +5,60 @@ return function(mod)
       type = "toggle",
       label = "FAIR BATTLE",
       default = true
+    },
+    {
+      key = "selection_mode",
+      type = "choice",
+      label = "SELECTION",
+      choices = {
+        { "Top Down", "top_down" },
+        { "Dynamic", "dynamic" }
+      },
+      default = "top_down"
     }
   })
 
   local current_match = nil
+
+  local function is_in_table(val, tbl)
+    for _, v in ipairs(tbl) do
+      if v == val then return true end
+    end
+    return false
+  end
+
+  local function is_benched(mon, benched_tbl)
+    for _, saved in ipairs(benched_tbl) do
+      if saved.mon == mon then return true end
+    end
+    return false
+  end
+
+  local function bench_mon(match, mon)
+    table.insert(match.benched, {
+      mon = mon,
+      status = mon.status,
+      hp = mon.hp
+    })
+    mon.status = "OUT"
+    
+    -- Spoof HP to 1 so the engine draws the dark UI ball and natively rejects Revives.
+    if mon.hp <= 0 then
+      mon.hp = 1
+    end
+  end
+
+  local function check_dynamic_limit(match, party)
+    if match.mode == "dynamic" and #match.active >= match.limit and not match.locked then
+      match.locked = true
+      for i = 1, #party do
+        local mon = party[i]
+        if not is_in_table(mon, match.active) and not is_benched(mon, match.benched) then
+          bench_mon(match, mon)
+        end
+      end
+    end
+  end
 
   mod.events:on("battle.started", function(ev)
     current_match = nil
@@ -20,54 +70,70 @@ return function(mod)
     local enemy_party = battle.enemyParty
     local player_party = battle.game.save.party
 
-    if not enemy_party or not player_party then return end
+    if not enemy_party or not player_party or not battle.player then return end
 
     local enemy_count = #enemy_party
     local player_count = #player_party
+    local mode = mod.options:get("selection_mode") or "top_down"
 
-    local active = {}
-    local benched = {}
+    current_match = {
+      battle = battle,
+      active = {},
+      benched = {},
+      limit = enemy_count,
+      mode = mode,
+      locked = false
+    }
 
-    local healthy_counted = 0
-    for i = 1, player_count do
-      local mon = player_party[i]
-      if mon.hp > 0 then
-        healthy_counted = healthy_counted + 1
-        if healthy_counted > enemy_count then
-          table.insert(benched, mon)
-        else
-          table.insert(active, mon)
-        end
-      else
-        -- Pokemon that are already fainted also get benched
-        table.insert(benched, mon)
-      end
+    local healthy_total = 0
+    for _, mon in ipairs(player_party) do
+      if mon.hp > 0 then healthy_total = healthy_total + 1 end
     end
 
-    if #benched > 0 then
-      current_match = {
-        battle = battle,
-        active = active,
-        benched = {}
-      }
-
-      battle:say(string.format("MATCH RULES: %dV%d", enemy_count, enemy_count))
-
-      for _, mon in ipairs(benched) do
-        -- Save original stats, including the 0 HP of fainted mons
-        table.insert(current_match.benched, {
-          mon = mon,
-          status = mon.status,
-          hp = mon.hp
-        })
-        mon.status = "OUT"
-        
-        -- Temporarily give fainted Pokemon 1 HP. 
-        -- This forces the dark status pokeball in the UI instead of the fainted ball, 
-        -- and naturally prevents the player from using a Revive (which requires HP == 0).
-        if mon.hp <= 0 then
-          mon.hp = 1
+    if mode == "top_down" then
+      local healthy_counted = 0
+      for i = 1, player_count do
+        local mon = player_party[i]
+        if mon.hp > 0 then
+          healthy_counted = healthy_counted + 1
+          if healthy_counted > enemy_count then
+            bench_mon(current_match, mon)
+          else
+            table.insert(current_match.active, mon)
+          end
+        else
+          bench_mon(current_match, mon)
         end
+      end
+      current_match.locked = true
+      
+    elseif mode == "dynamic" then
+      local lead = battle.player.mon
+      table.insert(current_match.active, lead)
+
+      for i = 1, player_count do
+        local mon = player_party[i]
+        -- Even in dynamic mode, pre-fainted mons cannot be chosen
+        if mon.hp <= 0 and mon ~= lead then
+          bench_mon(current_match, mon)
+        end
+      end
+      
+      check_dynamic_limit(current_match, player_party)
+    end
+
+    if healthy_total > enemy_count then
+      battle:say(string.format("MATCH RULES: %dV%d", enemy_count, enemy_count))
+    end
+  end)
+
+  -- Track dynamically sent out Pokémon
+  mod.events:on("battle.battler_switched", function(ev)
+    if current_match and ev.battler.isPlayer then
+      local new_mon = ev.battler.mon
+      if not is_in_table(new_mon, current_match.active) then
+        table.insert(current_match.active, new_mon)
+        check_dynamic_limit(current_match, current_match.battle.game.save.party)
       end
     end
   end)
@@ -114,15 +180,29 @@ return function(mod)
   mod.events:on("battle.fainted", function(ev)
     if not current_match then return end
     if ev.battler.isPlayer then
-      local all_fainted = true
+      local can_continue = false
+      
+      -- Check if any already-active Pokémon is still alive
       for _, mon in ipairs(current_match.active) do
         if mon.hp > 0 then
-          all_fainted = false
+          can_continue = true
           break
         end
       end
+      
+      -- Check if there are valid unbenched options left (Dynamic Mode)
+      if not can_continue and #current_match.active < current_match.limit then
+        local party = current_match.battle.game.save.party
+        for _, mon in ipairs(party) do
+          if mon.hp > 0 and mon.status ~= "OUT" then
+            can_continue = true
+            break
+          end
+        end
+      end
 
-      if all_fainted then
+      -- If the player cannot continue the match, trigger a native white-out
+      if not can_continue then
         for _, saved in ipairs(current_match.benched) do
           saved.mon.hp = 0
         end

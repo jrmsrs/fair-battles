@@ -1,7 +1,7 @@
 {
   "id": "fair_battles",
   "name": "Fair Battles",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entry": "main.lua",
   "api": 2,
   "description": "Automatically limits your usable party size to match the opponent's party size.",
