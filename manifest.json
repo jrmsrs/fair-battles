@@ -6,5 +6,6 @@
   "api": 2,
   "description": "Automatically limits your usable party size to match the opponent's party size.",
   "profile": "content",
-  "affects_link": false
+  "affects_link": false,
+  "github": "jrmsrs/fair_battles"
 }
