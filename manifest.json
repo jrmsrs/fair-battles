@@ -1,11 +1,11 @@
 {
   "id": "fair_battles",
   "name": "Fair Battles",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "entry": "main.lua",
   "api": 2,
   "description": "Automatically limits your usable party size to match the opponent's party size.",
   "profile": "content",
   "affects_link": false,
-  "github": "jrmsrs/fair_battles"
+  "github": "jrmsrs/fair-battles"
 }
