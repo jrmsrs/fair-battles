@@ -12,8 +12,8 @@ return function(mod)
       label = "SELECTION",
       choices = {
         { "Top Down", "top_down" },
-        { "(Unstable) Dynamic", "dynamic" },
-        { "(Unstable) Draft", "draft" }
+        { "Dynamic", "dynamic" },
+        { "Draft", "draft" }
       },
       default = "top_down"
     }
@@ -83,7 +83,8 @@ return function(mod)
       benched = {},
       limit = enemy_count,
       mode = mode,
-      locked = false
+      locked = false,
+      initialized = false
     }
 
     local healthy_total = 0
@@ -96,63 +97,52 @@ return function(mod)
       battle:say(string.format("MATCH RULES: %dV%d", enemy_count, enemy_count))
     end
 
-    -- ===========================
-    -- MODE 1: TOP DOWN
-    -- ===========================
-    if mode == "top_down" then
-      local healthy_counted = 0
-      for i = 1, player_count do
-        local mon = player_party[i]
-        if mon.hp > 0 then
-          healthy_counted = healthy_counted + 1
-          if healthy_counted > enemy_count then
-            bench_mon(current_match, mon)
-          else
-            table.insert(current_match.active, mon)
+    -- Pre-bench already fainted Pokémon immediately, regardless of the mode.
+    for i = 1, #player_party do
+      local mon = player_party[i]
+      if mon.hp <= 0 then
+        bench_mon(current_match, mon)
+      end
+    end
+
+    -- Queue the roster initialization at the end of the intro queue.
+    battle:act(function()
+      if not current_match or current_match.initialized then return end
+      current_match.initialized = true
+
+      local lead = battle.player.mon
+      table.insert(current_match.active, lead)
+
+      if mode == "top_down" then
+        local active_count = 1
+        for i = 1, player_count do
+          local mon = player_party[i]
+          if mon ~= lead and mon.status ~= "OUT" then
+            if active_count < enemy_count then
+              table.insert(current_match.active, mon)
+              active_count = active_count + 1
+            else
+              bench_mon(current_match, mon)
+            end
           end
-        else
-          bench_mon(current_match, mon)
         end
-      end
-      current_match.locked = true
-      
-    -- ===========================
-    -- MODE 2: DYNAMIC
-    -- ===========================
-    elseif mode == "dynamic" then
-      local lead = battle.player.mon
-      table.insert(current_match.active, lead)
+        current_match.locked = true
 
-      for i = 1, player_count do
-        local mon = player_party[i]
-        if mon.hp <= 0 and mon ~= lead then
-          bench_mon(current_match, mon)
+      elseif mode == "dynamic" then
+        check_dynamic_limit(current_match, player_party)
+
+      elseif mode == "draft" then
+        local draftable_count = 0
+        for i = 1, player_count do
+          local mon = player_party[i]
+          if mon ~= lead and mon.status ~= "OUT" then
+            draftable_count = draftable_count + 1
+          end
         end
-      end
-      
-      check_dynamic_limit(current_match, player_party)
 
-    -- ===========================
-    -- MODE 3: DRAFT (BATTLE TOWER STYLE)
-    -- ===========================
-    elseif mode == "draft" then
-      local lead = battle.player.mon
-      table.insert(current_match.active, lead)
-
-      -- Bench pre-fainted Pokémon immediately
-      for i = 1, player_count do
-        local mon = player_party[i]
-        if mon.hp <= 0 and mon ~= lead then
-          bench_mon(current_match, mon)
-        end
-      end
-
-      -- If player has more healthy Pokémon than enemy count, invoke draft UI
-      if healthy_total > enemy_count then
-        local picks_needed = enemy_count - 1
-        
-        -- If enemy only has 1 Pokémon, lead is enough. Auto-bench the rest.
-        if picks_needed == 0 then
+        -- If player has more healthy Pokémon than enemy count
+        local picks_needed = enemy_count - 1        
+        if picks_needed <= 0 or draftable_count == 0 then
           for i = 1, player_count do
             local mon = player_party[i]
             if mon ~= lead and mon.status ~= "OUT" then
@@ -161,8 +151,8 @@ return function(mod)
           end
           current_match.locked = true
         else
-          -- Insert Selection UI into Battle Queue
-          battle:ui(function()
+          -- Push the draft UI to immediately follow this queued action
+          battle:uiNext(function()
             local items = {}
             local current_picks = 0
             local picked_mons = {}
@@ -251,10 +241,10 @@ return function(mod)
           end)
         end
       end
-    end
+    end)
   end)
 
-  -- Continuous dynamic check for "Dynamic" mode
+  -- Intercept battler switches to dynamically add new Pokémon to the active roster
   mod.events:on("battle.battler_switched", function(ev)
     if current_match and ev.battler.isPlayer then
       local new_mon = ev.battler.mon
