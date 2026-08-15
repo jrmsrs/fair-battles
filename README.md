@@ -1,4 +1,4 @@
-# gen1recomp - Fair Battles Mod
+# gen1recomp - Fair Battles Mod (Red, Blue, Yellow, Gold)
 
 a QoL and somewhat of a dynamic scaling mod that limits your usable party size to match the number of PKM your opponent has.
 
@@ -13,6 +13,7 @@ if all of your active PKM faint, you will white-out, regardless of the healthy P
 
 ## Features
 
+* **compatible with Gen 1 and Gen 2:** this mod works with both the original Red/Blue/Yellow games and the current beta Pokémon Gold.
 * **dynamic party limiting:** automatically matches your usable party size to the opponent's party size during trainer battles.
 * **customizable selection modes:** head to the game's Mod Options to choose how you want your active team to be selected:
   * **Top Down (Default):** the mod automatically counts your healthy PKM from the top of your party down, putting the rest on the "bench" for the duration of the match.

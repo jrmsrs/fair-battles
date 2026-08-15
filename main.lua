@@ -1,4 +1,8 @@
 return function(mod)
+  -- ==========================================================================
+  -- MOD OPTIONS
+  -- ==========================================================================
+  -- Defines the customizable settings available in the game's Mod Manager.
   mod.options:define({
     {
       key = "fair_battle",
@@ -19,8 +23,14 @@ return function(mod)
     }
   })
 
+  -- State tracker for the currently active battle.
   local current_match = nil
 
+  -- ==========================================================================
+  -- HELPER FUNCTIONS
+  -- ==========================================================================
+
+  -- Checks if a specific value exists within an indexed table.
   local function is_in_table(val, tbl)
     for _, v in ipairs(tbl) do
       if v == val then return true end
@@ -28,6 +38,7 @@ return function(mod)
     return false
   end
 
+  -- Checks if a specific Pokémon object is currently in the benched table.
   local function is_benched(mon, benched_tbl)
     for _, saved in ipairs(benched_tbl) do
       if saved.mon == mon then return true end
@@ -35,20 +46,38 @@ return function(mod)
     return false
   end
 
+  -- Moves a Pokémon to the bench, saving its original state and applying restrictions.
   local function bench_mon(match, mon)
+    local game_ref = match.battle.game or mod.game
+    local base_name = mon.nickname or (mon.species and game_ref.data.pokemon[mon.species].name) or "PKMN"
+
+    -- Save the exact pre-battle state to restore it safely after the match.
     table.insert(match.benched, {
       mon = mon,
       status = mon.status,
-      hp = mon.hp
+      hp = mon.hp,
+      original_nickname = mon.nickname
     })
+    
+    -- Assign the custom "OUT" status and spoof HP to natively block revives.
     mon.status = "OUT"
+    if mon.hp <= 0 then mon.hp = 1 end
 
-    -- Force previously FNT to be OUT by forcing HP=1 during battle
-    if mon.hp <= 0 then
-      mon.hp = 1
+    -- VISUAL FEEDBACK (GEN 2 ONLY): Prepends a compressed "[X]" tag to the Pokémon's name.
+    -- Required because Gen 2 UI natively ignores the custom "OUT" status.
+    -- Ensures it respects the strict 10-character limit of early generations.
+    if match.is_gen2 then
+      if not string.match(base_name, "^%[X%]") then
+        if string.len(base_name) <= 7 then
+          mon.nickname = "[X]" .. base_name
+        else
+          mon.nickname = "[X]" .. string.sub(base_name, 1, 6) .. "."
+        end
+      end
     end
   end
 
+  -- Evaluates if the dynamic limit has been reached. If so, benches all remaining unsent Pokémon.
   local function check_dynamic_limit(match, party)
     if match.mode == "dynamic" and #match.active >= match.limit and not match.locked then
       match.locked = true
@@ -61,6 +90,9 @@ return function(mod)
     end
   end
 
+  -- ==========================================================================
+  -- CORE BATTLE INITIALIZATION
+  -- ==========================================================================
   mod.events:on("battle.started", function(ev)
     current_match = nil
 
@@ -68,15 +100,21 @@ return function(mod)
     if ev.kind ~= "trainer" then return end
 
     local battle = ev.battle
+    -- Feature Detection: Differentiates between Gen 1 and Gen 2 engine architectures.
+    local is_gen2 = (battle.say == nil) 
+    
     local enemy_party = battle.enemyParty
-    local player_party = battle.game.save.party
+    -- Resolves the correct party reference based on the generation.
+    local player_party = is_gen2 and battle.party or battle.game.save.party
 
-    if not enemy_party or not player_party or not battle.player then return end
+    if not enemy_party or not player_party then return end
+    if not is_gen2 and not battle.player then return end
 
     local enemy_count = #enemy_party
     local player_count = #player_party
     local mode = mod.options:get("selection_mode") or "top_down"
 
+    -- Initialize the global state for the new match.
     current_match = {
       battle = battle,
       active = {},
@@ -84,40 +122,39 @@ return function(mod)
       limit = enemy_count,
       mode = mode,
       locked = false,
-      initialized = false
+      initialized = false,
+      is_gen2 = is_gen2,
+      needs_intro = true 
     }
 
     local healthy_total = 0
     for _, mon in ipairs(player_party) do
-      if mon.hp > 0 then healthy_total = healthy_total + 1 end
+      if mon.hp > 0 and not mon.isEgg then healthy_total = healthy_total + 1 end
     end
 
-    -- Queue the MATCH RULES dialogue FIRST before any UI is pushed
-    if healthy_total > enemy_count then
-      battle:say(string.format("MATCH RULES: %dV%d", enemy_count, enemy_count))
-    end
-
-    -- Pre-bench already fainted Pokémon immediately, regardless of the mode.
-    for i = 1, #player_party do
-      local mon = player_party[i]
-      if mon.hp <= 0 then
-        bench_mon(current_match, mon)
+    -- ========================================
+    -- GEN 2 SPECIFIC INITIALIZATION
+    -- ========================================
+    if is_gen2 then
+      -- Automatically bench Pokémon that are already fainted (except in Draft, handled later).
+      if mode ~= "draft" then
+        for i = 1, #player_party do
+          local mon = player_party[i]
+          if mon.hp <= 0 and not mon.isEgg then
+            bench_mon(current_match, mon)
+          end
+        end
       end
-    end
-
-    -- Queue the roster initialization at the end of the intro queue.
-    battle:act(function()
-      if not current_match or current_match.initialized then return end
-      current_match.initialized = true
-
-      local lead = battle.player.mon
+      
+      local lead = battle.player
       table.insert(current_match.active, lead)
 
+      -- Gen 2 Top Down Logic
       if mode == "top_down" then
         local active_count = 1
         for i = 1, player_count do
           local mon = player_party[i]
-          if mon ~= lead and mon.status ~= "OUT" then
+          if mon ~= lead and not is_benched(mon, current_match.benched) and not mon.isEgg then
             if active_count < enemy_count then
               table.insert(current_match.active, mon)
               active_count = active_count + 1
@@ -128,68 +165,266 @@ return function(mod)
         end
         current_match.locked = true
 
+      -- Gen 2 Dynamic Logic
       elseif mode == "dynamic" then
         check_dynamic_limit(current_match, player_party)
+      end
 
-      elseif mode == "draft" then
-        local draftable_count = 0
-        for i = 1, player_count do
-          local mon = player_party[i]
-          if mon ~= lead and mon.status ~= "OUT" then
-            draftable_count = draftable_count + 1
-          end
+    -- ========================================
+    -- GEN 1 SPECIFIC INITIALIZATION
+    -- ========================================
+    else
+      -- GEN 1 ORIGINAL LOGIC (utilizing battle:act for synchronous events)
+      if healthy_total > enemy_count then
+        battle:say(string.format("MATCH RULES: %dV%d", enemy_count, enemy_count))
+      end
+
+      -- Auto-bench fainted Pokémon.
+      for i = 1, #player_party do
+        local mon = player_party[i]
+        if mon.hp <= 0 then
+          bench_mon(current_match, mon)
         end
+      end
 
-        -- If player has more healthy Pokémon than enemy count
-        local picks_needed = enemy_count - 1        
-        if picks_needed <= 0 or draftable_count == 0 then
+      battle:act(function()
+        if not current_match or current_match.initialized then return end
+        current_match.initialized = true
+
+        local lead = battle.player.mon
+        table.insert(current_match.active, lead)
+
+        -- Gen 1 Top Down
+        if mode == "top_down" then
+          local active_count = 1
           for i = 1, player_count do
             local mon = player_party[i]
             if mon ~= lead and mon.status ~= "OUT" then
-              bench_mon(current_match, mon)
+              if active_count < enemy_count then
+                table.insert(current_match.active, mon)
+                active_count = active_count + 1
+              else
+                bench_mon(current_match, mon)
+              end
             end
           end
           current_match.locked = true
-        else
-          -- Push the draft UI to immediately follow this queued action
-          battle:uiNext(function()
-            local items = {}
-            local current_picks = 0
-            local picked_mons = {}
-            
+
+        -- Gen 1 Dynamic
+        elseif mode == "dynamic" then
+          check_dynamic_limit(current_match, player_party)
+
+        -- Gen 1 Draft
+        elseif mode == "draft" then
+          local draftable_count = 0
+          for i = 1, player_count do
+            local mon = player_party[i]
+            if mon ~= lead and mon.status ~= "OUT" then
+              draftable_count = draftable_count + 1
+            end
+          end
+
+          local picks_needed = enemy_count - 1
+          -- Auto-lock if no drafting is necessary.
+          if picks_needed <= 0 or draftable_count == 0 then
             for i = 1, player_count do
               local mon = player_party[i]
-              -- Safe check: filter out lead and anyone marked OUT (which includes fainted ones)
               if mon ~= lead and mon.status ~= "OUT" then
-                local item = {
-                  label = mon.nickname or battle.game.data.pokemon[mon.species].name,
-                  right = " ",
-                  mon = mon
-                }
-                item.onSelect = function(self_item, menu)
-                  if picked_mons[mon] then
-                    picked_mons[mon] = nil
-                    current_picks = current_picks - 1
-                    self_item.right = " "
-                  else
-                    if current_picks < picks_needed then
-                      picked_mons[mon] = true
-                      current_picks = current_picks + 1
-                      self_item.right = "IN"
+                bench_mon(current_match, mon)
+              end
+            end
+            current_match.locked = true
+          else
+            -- Render the Gen 1 Draft UI.
+            battle:uiNext(function()
+              local items = {}
+              local current_picks = 0
+              local picked_mons = {}
+              local draft_menu
+              
+              for i = 1, player_count do
+                local mon = player_party[i]
+                if mon ~= lead and mon.status ~= "OUT" then
+                  local display_name = string.gsub(mon.nickname or battle.game.data.pokemon[mon.species].name or "?", "^%[X%]", "")
+                  local item = {
+                    label = display_name,
+                    right = " ",
+                    mon = mon
+                  }
+                  item.onSelect = function(self_item)
+                    if picked_mons[mon] then
+                      picked_mons[mon] = nil
+                      current_picks = current_picks - 1
+                      self_item.right = " "
                     else
-                      require("src.core.Sound").play(battle.game.data, "Denied")
+                      if current_picks < picks_needed then
+                        picked_mons[mon] = true
+                        current_picks = current_picks + 1
+                        self_item.right = "IN"
+                      else
+                        require("src.core.Sound").play(battle.game.data, "Denied")
+                      end
+                    end
+                  end
+                  table.insert(items, item)
+                end
+              end
+              
+              local function encerrar_draft()
+                for _, item_mon in ipairs(items) do
+                  if item_mon.mon then
+                    if picked_mons[item_mon.mon] then
+                      table.insert(current_match.active, item_mon.mon)
+                    else
+                      bench_mon(current_match, item_mon.mon)
                     end
                   end
                 end
-                table.insert(items, item)
+                current_match.locked = true
+                if draft_menu then draft_menu:close() end
               end
-            end
-            
-            table.insert(items, {
-              label = "[ FINISH ]",
-              onSelect = function(self_item, menu)
-                if current_picks == picks_needed then
-                  -- Lock choices and close menu
+
+              table.insert(items, {
+                label = "[ FINISH ]",
+                onSelect = function(self_item)
+                  if current_picks == picks_needed then
+                    encerrar_draft()
+                  else
+                    require("src.core.Sound").play(battle.game.data, "Denied")
+                    local TextBox = require("src.render.TextBox")
+                    local missing = picks_needed - current_picks
+                    battle.game.stack:push(TextBox.new(battle.game, "Please select\n" .. missing .. " more!"))
+                  end
+                end
+              })
+
+              local function fallback_autofill(menu)
+                if not current_match then 
+                  if menu then menu:close() end 
+                  return 
+                end
+                for _, item_mon in ipairs(items) do
+                  if item_mon.mon then
+                    if current_picks < picks_needed and not picked_mons[item_mon.mon] then
+                      picked_mons[item_mon.mon] = true
+                      current_picks = current_picks + 1
+                      table.insert(current_match.active, item_mon.mon)
+                    elseif not picked_mons[item_mon.mon] then
+                      bench_mon(current_match, item_mon.mon)
+                    else
+                      if not is_in_table(item_mon.mon, current_match.active) then
+                        table.insert(current_match.active, item_mon.mon)
+                      end
+                    end
+                  end
+                end
+                current_match.locked = true
+                if menu then menu:close() end
+              end
+
+              draft_menu = mod.ui.ListMenu.new(battle.game, "CHOOSE " .. picks_needed, items, {
+                footer = "A:SEL B:AUTOFILL",
+                onChoose = function(item)
+                  if item.onSelect then item.onSelect(item) end
+                end,
+                onCancel = function(menu) fallback_autofill(menu) end
+              })
+              
+              return draft_menu
+            end)
+          end
+        end
+      end)
+    end
+  end)
+
+  -- ==========================================================================
+  -- UI HOOKS AND INTERCEPTIONS (SCREEN.PUSHED)
+  -- ==========================================================================
+  mod.events:on("screen.pushed", function(ev)
+    local state = ev.state
+    if not current_match then return end
+
+    -- ========================================
+    -- GEN 2 DRAFT UI AND EVENT QUEUE HOOK
+    -- ========================================
+    if current_match.is_gen2 and state.screenId == "Gen2BattleState" and not state.__fb_queue_hooked then
+      state.__fb_queue_hooked = true
+      
+      local orig_advanceQueue = state.advanceQueue
+      state.advanceQueue = function(self)
+        local ret = orig_advanceQueue(self)
+        
+        -- Hook precisely when the battle menu appears (turn 1 or switch menu).
+        if self.phase == "menu" and current_match and not current_match.intro_done then
+          current_match.intro_done = true
+          
+          local player_party = self.battle.party
+          local enemy_count = current_match.limit
+          local lead = self.battle.player
+          
+          local healthy_total = 0
+          for _, mon in ipairs(player_party) do
+            if mon.hp > 0 and not mon.isEgg then healthy_total = healthy_total + 1 end
+          end
+
+          if healthy_total > enemy_count then
+            if current_match.mode == "draft" then
+              local draftable_count = 0
+              for i = 1, #player_party do
+                local mon = player_party[i]
+                if mon ~= lead and not is_benched(mon, current_match.benched) and not mon.isEgg then
+                  draftable_count = draftable_count + 1
+                end
+              end
+
+              local picks_needed = enemy_count - 1
+              if picks_needed <= 0 or draftable_count == 0 then
+                for i = 1, #player_party do
+                  local mon = player_party[i]
+                  if mon ~= lead and not is_benched(mon, current_match.benched) and not mon.isEgg then
+                    bench_mon(current_match, mon)
+                  end
+                end
+                current_match.locked = true
+                self.game.stack:push(require("src.render.TextBox").new(self.game, string.format("MATCH RULES: %dV%d", enemy_count, enemy_count)))
+              else
+                -- Initialize Gen 2 Draft UI
+                local items = {}
+                local current_picks = 0
+                local picked_mons = {}
+                local draft_menu 
+
+                for i = 1, #player_party do
+                  local mon = player_party[i]
+                  if mon ~= lead and not is_benched(mon, current_match.benched) and not mon.isEgg then
+                    -- Visually sanitize the "[X]" hack exclusively for the Draft menu representation.
+                    local display_name = string.gsub(mon.nickname or self.game.data.pokemon[mon.species].name or "?", "^%[X%]", "")
+                    local item = {
+                      label = display_name,
+                      right = " ",
+                      mon = mon
+                    }
+                    item.onSelect = function(self_item)
+                      if picked_mons[mon] then
+                        picked_mons[mon] = nil
+                        current_picks = current_picks - 1
+                        self_item.right = " "
+                      else
+                        if current_picks < picks_needed then
+                          picked_mons[mon] = true
+                          current_picks = current_picks + 1
+                          self_item.right = "IN"
+                        else
+                          require("src.core.Sound").play(self.game.data, "Denied")
+                        end
+                      end
+                    end
+                    table.insert(items, item)
+                  end
+                end
+
+                local function encerrar_draft()
                   for _, item_mon in ipairs(items) do
                     if item_mon.mon then
                       if picked_mons[item_mon.mon] then
@@ -200,65 +435,124 @@ return function(mod)
                     end
                   end
                   current_match.locked = true
-                  menu:close()
-                else
-                  -- Provide UI feedback instead of just failing silently
-                  require("src.core.Sound").play(battle.game.data, "Denied")
-                  local TextBox = require("src.render.TextBox")
-                  local missing = picks_needed - current_picks
-                  battle.game.stack:push(TextBox.new(battle.game, "Please select\n" .. missing .. " more!"))
+                  if draft_menu then draft_menu:close() end
                 end
-              end
-            })
 
-            local function fallback_autofill()
-              -- Auto-fill the missing picks to avoid exploits on B-Cancel
-              for _, item_mon in ipairs(items) do
-                if item_mon.mon then
-                  if current_picks < picks_needed and not picked_mons[item_mon.mon] then
-                    picked_mons[item_mon.mon] = true
-                    current_picks = current_picks + 1
-                    table.insert(current_match.active, item_mon.mon)
-                  elseif not picked_mons[item_mon.mon] then
-                    bench_mon(current_match, item_mon.mon)
-                  else
-                    table.insert(current_match.active, item_mon.mon)
+                table.insert(items, {
+                  label = "[ FINISH ]",
+                  onSelect = function(self_item)
+                    if current_picks == picks_needed then
+                      encerrar_draft()
+                    else
+                      require("src.core.Sound").play(self.game.data, "Denied")
+                      self.game.stack:push(require("src.render.TextBox").new(self.game, "Please select\n" .. (picks_needed - current_picks) .. " more!"))
+                    end
                   end
-                end
-              end
-              current_match.locked = true
-            end
+                })
 
-            return mod.ui.ListMenu.new(battle.game, "CHOOSE " .. picks_needed, items, {
-              footer = "A:SEL B:AUTOFILL",
-              onChoose = function(item, menu)
-                if item.onSelect then item.onSelect(item, menu) end
-              end,
-              onCancel = function()
-                fallback_autofill()
+                local function fallback_autofill(menu)
+                  if not current_match then 
+                    if menu then menu:close() end 
+                    return 
+                  end
+                  for _, item_mon in ipairs(items) do
+                    if item_mon.mon then
+                      if current_picks < picks_needed and not picked_mons[item_mon.mon] then
+                        picked_mons[item_mon.mon] = true
+                        current_picks = current_picks + 1
+                        table.insert(current_match.active, item_mon.mon)
+                      elseif not picked_mons[item_mon.mon] then
+                        bench_mon(current_match, item_mon.mon)
+                      else
+                        if not is_in_table(item_mon.mon, current_match.active) then
+                          table.insert(current_match.active, item_mon.mon)
+                        end
+                      end
+                    end
+                  end
+                  current_match.locked = true
+                  if menu then menu:close() end
+                end
+
+                local ListMenu = require("src.ui.ListMenu")
+                draft_menu = ListMenu.new(self.game, "CHOOSE " .. picks_needed, items, {
+                  footer = "A:SEL B:AUTOFILL",
+                  onChoose = function(item)
+                    if item.onSelect then item.onSelect(item) end
+                  end,
+                  onCancel = function(menu) fallback_autofill(menu) end
+                })
+
+                self.game.stack:push(draft_menu)
+                self.game.stack:push(require("src.render.TextBox").new(self.game, string.format("MATCH RULES: %dV%d", enemy_count, enemy_count)))
               end
-            })
-          end)
+            else
+              -- Top Down / Dynamic standard rules text.
+              self.game.stack:push(require("src.render.TextBox").new(self.game, string.format("MATCH RULES: %dV%d", enemy_count, enemy_count)))
+            end
+          end
+        end
+        return ret
+      end
+    end
+
+    -- ========================================
+    -- UNIVERSAL SWITCH BLOCKER (BOTH GENS)
+    -- ========================================
+    -- Captures both standard and extended UI hooks for party menus.
+    if state.screenId == "PartyMenu" or state.screenId == "Gen2PartyMenu" or state.party then
+      local function handle_block(orig_fn)
+        return function(a, b, c, d)
+          -- Safely resolve the Pokémon object from variable argument payloads across versions.
+          local mon = nil
+          if type(a) == "table" and a.hp then mon = a
+          elseif type(b) == "table" and b.hp then mon = b end
+          
+          if mon and current_match and is_benched(mon, current_match.benched) then
+            local game_ref = state.game or mod.game
+            require("src.core.Sound").play(game_ref.data, "Denied")
+            game_ref.stack:push(require("src.render.TextBox").new(game_ref, "MATCH RULES:\nThis POKéMON is\nbenched!"))
+            return true -- Silently abort the switch action.
+          end
+          if orig_fn then return orig_fn(a, b, c, d) end
         end
       end
-    end)
-  end)
 
-  -- Intercept battler switches to dynamically add new Pokémon to the active roster
-  mod.events:on("battle.battler_switched", function(ev)
-    if current_match and ev.battler.isPlayer then
-      local new_mon = ev.battler.mon
-      if not is_in_table(new_mon, current_match.active) then
-        table.insert(current_match.active, new_mon)
-        check_dynamic_limit(current_match, current_match.battle.game.save.party)
+      if state.onChoose and not state.__fb_hooked_choose then
+        state.__fb_hooked_choose = true
+        state.onChoose = handle_block(state.onChoose)
+      end
+
+      if state.onSwitch and not state.__fb_hooked_switch then
+        state.__fb_hooked_switch = true
+        state.onSwitch = handle_block(state.onSwitch)
       end
     end
   end)
 
-  -- Prevent voluntary switching from submenu
-  mod.hooks:wrap("ui.party.submenu", function(next, game, items, mon, ctx)
-    local result = next(game, items, mon, ctx)
-    if ctx.battle and current_match and mon.status == "OUT" then
+  -- ==========================================================================
+  -- REAL-TIME BATTLE EVENTS
+  -- ==========================================================================
+
+  -- Registers newly sent out Pokémon into the active roster for Dynamic Mode tracking.
+  mod.events:on("battle.battler_switched", function(ev)
+    if not current_match then return end
+    
+    local is_player = current_match.is_gen2 and (ev.side and ev.side.key == "player") or (ev.battler and ev.battler.isPlayer)
+    if is_player then
+      local new_mon = current_match.is_gen2 and ev.battler or ev.battler.mon
+      if not is_in_table(new_mon, current_match.active) then
+        table.insert(current_match.active, new_mon)
+        local party = current_match.is_gen2 and current_match.battle.party or current_match.battle.game.save.party
+        check_dynamic_limit(current_match, party)
+      end
+    end
+  end)
+
+  -- Filters out "switch" and "battle_switch" options from the Party UI Submenu for benched mons.
+  mod.hooks:wrap("ui.party.submenu", function(next_fn, game, items, mon, ctx)
+    local result = next_fn(game, items, mon, ctx)
+    if ctx.battle and current_match and is_benched(mon, current_match.benched) then
       local filtered = {}
       for _, item in ipairs(result) do
         if item.action ~= "battle_switch" and item.action ~= "switch" then
@@ -270,38 +564,13 @@ return function(mod)
     return result
   end)
 
-  -- Dynamically intercept PartyMenu instances to handle forced switches
-  mod.events:on("screen.pushed", function(ev)
-    local state = ev.state
-    if current_match and state.onSwitch and (state.screenId == "PartyMenu" or state.party) then
-      if not state.__fair_battle_hooked then
-        state.__fair_battle_hooked = true
-        
-        local orig_onSwitch = state.onSwitch
-        state.onSwitch = function(mon, menu)
-          if mon.status == "OUT" then
-            -- PartyMenu pops itself before calling onSwitch during forced switches. Push it back.
-            if not menu.keepOpen then
-              menu.game.stack:push(menu)
-            end
-            
-            require("src.core.Sound").play(menu.game.data, "Denied")
-            local TextBox = require("src.render.TextBox")
-            menu.game.stack:push(TextBox.new(menu.game, "MATCH RULES:\nThis POKéMON is\nbenched!"))
-            return
-          end
-          return orig_onSwitch(mon, menu)
-        end
-      end
-    end
-  end)
-
-  -- Apply native white-out if all valid active Pokémon faint
+  -- Handles Match Wipes: If the permitted active roster falls, forces a white-out.
   mod.events:on("battle.fainted", function(ev)
     if not current_match then return end
-    if ev.battler.isPlayer then
+    
+    local is_player = current_match.is_gen2 and (ev.side and ev.side.key == "player") or (ev.battler and ev.battler.isPlayer)
+    if is_player then
       local can_continue = false
-      
       for _, mon in ipairs(current_match.active) do
         if mon.hp > 0 then
           can_continue = true
@@ -309,17 +578,18 @@ return function(mod)
         end
       end
       
-      -- Validate remaining options for Dynamic mode specifically
+      local party = current_match.is_gen2 and current_match.battle.party or current_match.battle.game.save.party
+      -- Failsafe for Dynamic mode: Checks if there is still room to send an unbenched mon.
       if not can_continue and current_match.mode == "dynamic" and #current_match.active < current_match.limit then
-        local party = current_match.battle.game.save.party
         for _, mon in ipairs(party) do
-          if mon.hp > 0 and mon.status ~= "OUT" then
+          if mon.hp > 0 and not is_benched(mon, current_match.benched) and not mon.isEgg then
             can_continue = true
             break
           end
         end
       end
 
+      -- Executioner: Eliminates benched HP to ensure the game forces a white-out state.
       if not can_continue then
         for _, saved in ipairs(current_match.benched) do
           saved.mon.hp = 0
@@ -328,26 +598,24 @@ return function(mod)
     end
   end)
 
-  -- Protect the "OUT" status from healing items
-  mod.hooks:wrap("battle.overlay", function(next, battle)
-    next(battle)
-    if current_match then
-      for _, saved in ipairs(current_match.benched) do
-        if saved.mon.status ~= "OUT" then
-          saved.mon.status = "OUT"
-        end
-      end
-    end
-  end)
-
-  -- Restore HP and Statuses natively
+  -- ==========================================================================
+  -- MATCH CLEANUP
+  -- ==========================================================================
   mod.events:on("battle.ended", function(ev)
     if current_match then
+      -- Fully restores the original pre-battle state of all benched Pokémon.
       for _, saved in ipairs(current_match.benched) do
         saved.mon.status = saved.status
         saved.mon.hp = saved.hp
+        -- Restores the clean nickname, removing the visual hack gracefully.
+        if saved.original_nickname then
+          saved.mon.nickname = saved.original_nickname
+        else
+          saved.mon.nickname = nil
+        end
       end
       current_match = nil
     end
   end)
+
 end
