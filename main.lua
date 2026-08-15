@@ -8,7 +8,7 @@ return function(mod)
       key = "fair_battle",
       type = "toggle",
       label = "FAIR BATTLE",
-      default = true
+        default = true
     },
     {
       key = "selection_mode",
@@ -23,7 +23,7 @@ return function(mod)
     }
   })
 
-  -- State tracker for the currently active battle.
+  -- State tracker for the currently active battle context.
   local current_match = nil
 
   -- ==========================================================================
@@ -38,7 +38,7 @@ return function(mod)
     return false
   end
 
-  -- Checks if a specific Pokémon object is currently in the benched table.
+  -- Checks if a specific Pokémon object is currently stored in the benched table.
   local function is_benched(mon, benched_tbl)
     for _, saved in ipairs(benched_tbl) do
       if saved.mon == mon then return true end
@@ -48,9 +48,6 @@ return function(mod)
 
   -- Moves a Pokémon to the bench, saving its original state and applying restrictions.
   local function bench_mon(match, mon)
-    local game_ref = match.battle.game or mod.game
-    local base_name = mon.nickname or (mon.species and game_ref.data.pokemon[mon.species].name) or "PKMN"
-
     -- Save the exact pre-battle state to restore it safely after the match.
     table.insert(match.benched, {
       mon = mon,
@@ -63,10 +60,12 @@ return function(mod)
     mon.status = "OUT"
     if mon.hp <= 0 then mon.hp = 1 end
 
-    -- VISUAL FEEDBACK (GEN 2 ONLY): Prepends a compressed "[X]" tag to the Pokémon's name.
-    -- Required because Gen 2 UI natively ignores the custom "OUT" status.
-    -- Ensures it respects the strict 10-character limit of early generations.
+    -- Applies visual feedback exclusively for Gen 2, as its UI natively ignores custom statuses.
+    -- Modifies the nickname while strictly respecting the 10-character limit.
     if match.is_gen2 then
+      local game_ref = match.battle.game or mod.game
+      local base_name = mon.nickname or (mon.species and game_ref.data.pokemon[mon.species].name) or "PKMN"
+
       if not string.match(base_name, "^%[X%]") then
         if string.len(base_name) <= 7 then
           mon.nickname = "[X]" .. base_name
@@ -104,7 +103,7 @@ return function(mod)
     local is_gen2 = (battle.say == nil) 
     
     local enemy_party = battle.enemyParty
-    -- Resolves the correct party reference based on the generation.
+    -- Resolves the correct party reference based on the active generation.
     local player_party = is_gen2 and battle.party or battle.game.save.party
 
     if not enemy_party or not player_party then return end
@@ -136,7 +135,7 @@ return function(mod)
     -- GEN 2 SPECIFIC INITIALIZATION
     -- ========================================
     if is_gen2 then
-      -- Automatically bench Pokémon that are already fainted (except in Draft, handled later).
+      -- Automatically bench Pokémon that are already fainted (except in Draft mode).
       if mode ~= "draft" then
         for i = 1, #player_party do
           local mon = player_party[i]
@@ -174,12 +173,12 @@ return function(mod)
     -- GEN 1 SPECIFIC INITIALIZATION
     -- ========================================
     else
-      -- GEN 1 ORIGINAL LOGIC (utilizing battle:act for synchronous events)
+      -- Synchronously render rules prior to the battle interface appearing.
       if healthy_total > enemy_count then
         battle:say(string.format("MATCH RULES: %dV%d", enemy_count, enemy_count))
       end
 
-      -- Auto-bench fainted Pokémon.
+      -- Pre-bench inherently fainted Pokémon.
       for i = 1, #player_party do
         local mon = player_party[i]
         if mon.hp <= 0 then
@@ -187,6 +186,8 @@ return function(mod)
         end
       end
 
+      -- Utilizes battle:act to defer logic until Turn 1 natively starts,
+      -- ensuring compatibility with third-party pre-battle UI mods (e.g., Choose Lead).
       battle:act(function()
         if not current_match or current_match.initialized then return end
         current_match.initialized = true
@@ -194,7 +195,7 @@ return function(mod)
         local lead = battle.player.mon
         table.insert(current_match.active, lead)
 
-        -- Gen 1 Top Down
+        -- Gen 1 Top Down Logic
         if mode == "top_down" then
           local active_count = 1
           for i = 1, player_count do
@@ -210,11 +211,11 @@ return function(mod)
           end
           current_match.locked = true
 
-        -- Gen 1 Dynamic
+        -- Gen 1 Dynamic Logic
         elseif mode == "dynamic" then
           check_dynamic_limit(current_match, player_party)
 
-        -- Gen 1 Draft
+        -- Gen 1 Draft Logic
         elseif mode == "draft" then
           local draftable_count = 0
           for i = 1, player_count do
@@ -225,7 +226,7 @@ return function(mod)
           end
 
           local picks_needed = enemy_count - 1
-          -- Auto-lock if no drafting is necessary.
+          -- Auto-lock and bypass UI if no drafting is necessary.
           if picks_needed <= 0 or draftable_count == 0 then
             for i = 1, player_count do
               local mon = player_party[i]
@@ -235,7 +236,7 @@ return function(mod)
             end
             current_match.locked = true
           else
-            -- Render the Gen 1 Draft UI.
+            -- Render the Gen 1 Draft UI immediately after the act queue.
             battle:uiNext(function()
               local items = {}
               local current_picks = 0
@@ -245,9 +246,8 @@ return function(mod)
               for i = 1, player_count do
                 local mon = player_party[i]
                 if mon ~= lead and mon.status ~= "OUT" then
-                  local display_name = string.gsub(mon.nickname or battle.game.data.pokemon[mon.species].name or "?", "^%[X%]", "")
                   local item = {
-                    label = display_name,
+                    label = mon.nickname or battle.game.data.pokemon[mon.species].name,
                     right = " ",
                     mon = mon
                   }
@@ -348,6 +348,8 @@ return function(mod)
     -- ========================================
     -- GEN 2 DRAFT UI AND EVENT QUEUE HOOK
     -- ========================================
+    -- Overrides the game's native event queue process to render Draft mode 
+    -- seamlessly precisely when the turn interface becomes active.
     if current_match.is_gen2 and state.screenId == "Gen2BattleState" and not state.__fb_queue_hooked then
       state.__fb_queue_hooked = true
       
@@ -355,7 +357,7 @@ return function(mod)
       state.advanceQueue = function(self)
         local ret = orig_advanceQueue(self)
         
-        -- Hook precisely when the battle menu appears (turn 1 or switch menu).
+        -- Hook precisely when the battle menu intro concludes.
         if self.phase == "menu" and current_match and not current_match.intro_done then
           current_match.intro_done = true
           
@@ -398,7 +400,7 @@ return function(mod)
                 for i = 1, #player_party do
                   local mon = player_party[i]
                   if mon ~= lead and not is_benched(mon, current_match.benched) and not mon.isEgg then
-                    -- Visually sanitize the "[X]" hack exclusively for the Draft menu representation.
+                    -- Visually sanitize the "[X]" hack exclusively for clean menu display.
                     local display_name = string.gsub(mon.nickname or self.game.data.pokemon[mon.species].name or "?", "^%[X%]", "")
                     local item = {
                       label = display_name,
@@ -483,6 +485,7 @@ return function(mod)
                   onCancel = function(menu) fallback_autofill(menu) end
                 })
 
+                -- Stacking UI elements bottom to top.
                 self.game.stack:push(draft_menu)
                 self.game.stack:push(require("src.render.TextBox").new(self.game, string.format("MATCH RULES: %dV%d", enemy_count, enemy_count)))
               end
@@ -499,11 +502,11 @@ return function(mod)
     -- ========================================
     -- UNIVERSAL SWITCH BLOCKER (BOTH GENS)
     -- ========================================
-    -- Captures both standard and extended UI hooks for party menus.
+    -- Enforces benched limitations by wrapping Party Menu callbacks dynamically.
     if state.screenId == "PartyMenu" or state.screenId == "Gen2PartyMenu" or state.party then
       local function handle_block(orig_fn)
         return function(a, b, c, d)
-          -- Safely resolve the Pokémon object from variable argument payloads across versions.
+          -- Safely resolve the Pokémon object dynamically across differing engine payloads.
           local mon = nil
           if type(a) == "table" and a.hp then mon = a
           elseif type(b) == "table" and b.hp then mon = b end
@@ -518,11 +521,13 @@ return function(mod)
         end
       end
 
+      -- Gen 2 relies heavily on `onChoose`.
       if state.onChoose and not state.__fb_hooked_choose then
         state.__fb_hooked_choose = true
         state.onChoose = handle_block(state.onChoose)
       end
 
+      -- Gen 1 and extended Gen 2 contexts rely on `onSwitch`.
       if state.onSwitch and not state.__fb_hooked_switch then
         state.__fb_hooked_switch = true
         state.onSwitch = handle_block(state.onSwitch)
@@ -534,7 +539,7 @@ return function(mod)
   -- REAL-TIME BATTLE EVENTS
   -- ==========================================================================
 
-  -- Registers newly sent out Pokémon into the active roster for Dynamic Mode tracking.
+  -- Registers newly active Pokémon and enforces Dynamic limits on-the-fly.
   mod.events:on("battle.battler_switched", function(ev)
     if not current_match then return end
     
@@ -549,7 +554,7 @@ return function(mod)
     end
   end)
 
-  -- Filters out "switch" and "battle_switch" options from the Party UI Submenu for benched mons.
+  -- Actively purges "switch" interactions from the submenu context array for benched targets.
   mod.hooks:wrap("ui.party.submenu", function(next_fn, game, items, mon, ctx)
     local result = next_fn(game, items, mon, ctx)
     if ctx.battle and current_match and is_benched(mon, current_match.benched) then
@@ -564,7 +569,7 @@ return function(mod)
     return result
   end)
 
-  -- Handles Match Wipes: If the permitted active roster falls, forces a white-out.
+  -- Handles complete wipes. Forces white-outs accurately under specific game engine constraints.
   mod.events:on("battle.fainted", function(ev)
     if not current_match then return end
     
@@ -579,7 +584,7 @@ return function(mod)
       end
       
       local party = current_match.is_gen2 and current_match.battle.party or current_match.battle.game.save.party
-      -- Failsafe for Dynamic mode: Checks if there is still room to send an unbenched mon.
+      -- Failsafe for Dynamic Mode: Validates if room permits sending out unbenched reserves.
       if not can_continue and current_match.mode == "dynamic" and #current_match.active < current_match.limit then
         for _, mon in ipairs(party) do
           if mon.hp > 0 and not is_benched(mon, current_match.benched) and not mon.isEgg then
@@ -589,10 +594,22 @@ return function(mod)
         end
       end
 
-      -- Executioner: Eliminates benched HP to ensure the game forces a white-out state.
+      -- The match limits are exhausted; collapse benched HP entirely to ensure a clean wipe.
       if not can_continue then
         for _, saved in ipairs(current_match.benched) do
           saved.mon.hp = 0
+        end
+      end
+    end
+  end)
+
+  -- Protects the visual "OUT" status from being overwritten by the game's native overlay logic.
+  mod.hooks:wrap("battle.overlay", function(next_fn, battle)
+    next_fn(battle)
+    if current_match then
+      for _, saved in ipairs(current_match.benched) do
+        if saved.mon.status ~= "OUT" then
+          saved.mon.status = "OUT"
         end
       end
     end
@@ -607,7 +624,7 @@ return function(mod)
       for _, saved in ipairs(current_match.benched) do
         saved.mon.status = saved.status
         saved.mon.hp = saved.hp
-        -- Restores the clean nickname, removing the visual hack gracefully.
+        -- Restores the clean nickname, effectively reversing the visual UI hack.
         if saved.original_nickname then
           saved.mon.nickname = saved.original_nickname
         else
