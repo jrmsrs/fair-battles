@@ -2,7 +2,7 @@
 
 a QoL and somewhat of a dynamic scaling mod that limits your usable party size to match the number of PKM your opponent has.
 
-![thumbnail](./7edd7385-145c-497e-a132-b303900968a2.jpg)
+![thumbnail](./Logo.png)
 
 while some difficulty mods/rom hacks try to make battles fairer by just increasing the number of PKM every opponent has, this mod takes the opposite approach to preserve the vanilla pacing. 
 there's a reason early route trainers only pack 2 or 3 PKM—early game battles are naturally tedious when your entire moveset consists of just Tackle, Growl, and Water Gun —,
